@@ -49,6 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/uefi-sheng
+          ref: 66421cb7bb5694843aec8de1ca3d1de4c20cca38 # pinned: newest uefi-sheng commit before device commit abfc15a
           path: uefi-sheng
           submodules: recursive
       - name: tools
