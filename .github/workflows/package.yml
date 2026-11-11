@@ -94,6 +94,15 @@ jobs:
                   raise SystemExit(f'{name}: {len(data)} bytes sha256 {digest} differs from firmware/wcn7850/manifest.json')
               print(f'{name}: {len(data)} bytes sha256 {digest} matches the manifest')
           PY
+      - name: device inputs
+        # The runtime step runs before the firmware step, so inputs a developer checkout already holds are fetched here:
+        # the proprietary-files.txt entries from its pinned @fetch mirror (SHA-256 checked) and the sources Ath12kWifi
+        # locks in tools/source-lock.json (commits and archive SHA-256 checked by fetch-sources.py).
+        working-directory: device
+        run: |
+          python3 scripts/extract-files.py
+          python3 scripts/extract-files.py --check
+          python3 drivers/Ath12kWifi/tools/fetch-sources.py
       - name: platform seed
         env:
           seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
