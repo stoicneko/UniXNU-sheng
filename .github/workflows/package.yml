@@ -72,6 +72,29 @@ jobs:
             [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
           done
           [ "$ok" = 1 ]
+      - name: WCN7850 firmware
+        # firmware/wcn7850 holds only the manifest; the binaries stay out of Git. The pinned linux-firmware commit carries
+        # exactly the files the manifest pins (sizes and SHA-256 checked below; any difference stops the run).
+        working-directory: device
+        env:
+          LINUX_FIRMWARE: 575bbe3f83565d18caa73e9b9458f754dd286f48 # linux-firmware: ath12k WCN7850 hw2.0 update board-2.bin
+        run: |
+          for name in amss.bin m3.bin board-2.bin; do
+            curl -fsSL --retry 3 -o "firmware/wcn7850/$name" \
+              "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath12k/WCN7850/hw2.0/$name?id=$LINUX_FIRMWARE" ||
+            curl -fsSL --retry 3 -o "firmware/wcn7850/$name" \
+              "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/$LINUX_FIRMWARE/ath12k/WCN7850/hw2.0/$name"
+          done
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          folder = pathlib.Path('firmware/wcn7850')
+          for name, want in json.loads((folder / 'manifest.json').read_text())['files'].items():
+              data = (folder / name).read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              if len(data) != want['bytes'] or digest != want['sha256']:
+                  raise SystemExit(f'{name}: {len(data)} bytes sha256 {digest} differs from firmware/wcn7850/manifest.json')
+              print(f'{name}: {len(data)} bytes sha256 {digest} matches the manifest')
+          PY
       - name: platform seed
         env:
           seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
