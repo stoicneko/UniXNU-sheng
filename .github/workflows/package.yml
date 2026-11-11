@@ -49,8 +49,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/uefi-sheng
+          ref: 66421cb7bb5694843aec8de1ca3d1de4c20cca38 # pinned: uefi-sheng main, unchanged since 2026-11-01
           path: uefi-sheng
           submodules: recursive
+      - name: repair Mesa patch header
+        # UniXNU 82b847c: turnip-frame-diagnostics.patch creates tu_frame_diagnostic.h without the "new file mode"
+        # line, so git apply stops at dev/null. UniXNU e7c359c adds exactly that line; add it here for the pinned revision.
+        working-directory: UniXNU
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          path = pathlib.Path('patches/mesa/turnip-frame-diagnostics.patch')
+          head = 'diff --git a/src/freedreno/vulkan/tu_frame_diagnostic.h b/src/freedreno/vulkan/tu_frame_diagnostic.h\n--- /dev/null\n'
+          text = path.read_text()
+          if text.startswith(head):
+              path.write_text(text.replace(head, head.replace('\n--- ', '\nnew file mode 100644\n--- ', 1), 1))
+              print('added the new file mode line')
+          elif 'new file mode 100644' in text.splitlines()[1]:
+              print('already has the new file mode line')
+          else:
+              raise SystemExit('unexpected header of ' + str(path))
+          PY
       - name: tools
         run: |
           brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
