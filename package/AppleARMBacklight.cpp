@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Panel brightness for the sheng board (boot argument sheng-backlight=1, started by BacklightProbe.cpp). The panel's backlight is two Kinetic KTZ8866 drivers at I2C
+// Panel brightness for the sheng board (boot argument backlight=1, started by BacklightProbe.cpp). The panel's backlight is two Kinetic KTZ8866 drivers at I2C
 // address 0x11, one on the QUP wrap1 serial engine 1 (i2c@a84000, "ktz8866a") and one on the I2C hub engine 2 (i2c@988000, "ktz8866b");
 // both get the same 11-bit level in BL_BRT_LSB (0x04, bits 2:0) and BL_BRT_MSB (0x05), as the mainline ktz8866 driver writes it.
 // The engines run the GENI I2C firmware the boot loaders left loaded and clocked; this code votes their clocks on again, keeps the clock
@@ -12,7 +12,7 @@
 // this file's classes are registered (int-229); the service answers user space's conformance query for it instead (publishFirst). Whether
 // CoreBrightness drives ShengBacklight is what native_backlight_stats[1] (brightness sets) shows. CoreBrightness (backboardd) looks for a backlight service with backlight-control = true, reads min and max from
 // IODisplayParameters brightness and sets {brightness, FadePeriod (16.16 seconds)} through setProperties. A fade is stepped every 16 ms by a
-// timer on the service's own work loop.
+// timer on the service's own work loop. iPadOS 27 reads a nits range and sets brightness-nits (signed 16.16) instead, and ramps by itself.
 #include <IOKit/IOService.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
@@ -23,6 +23,8 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSDictionary.h>
+#include <libkern/c++/OSData.h>
+#include <libkern/c++/OSSymbol.h>
 #include <pexpert/pexpert.h>
 #include "GeniI2c.h"
 
@@ -45,6 +47,9 @@ constexpr uint32_t kGccVote = 0x52008;
 constexpr uint32_t kVoteBits = (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21) | (1u << 23) | (1u << 7) | (1u << 8) | (1u << 12);
 constexpr uint32_t kHalt[] = {0x23294, 0x23284, 0x2327c, 0x23280, 0x1813c, 0x23140, 0x23144, 0x1703c};
 constexpr uint8_t kAddress = 0x11, kBrtLsb = 0x04, kBrtMsb = 0x05;
+// The range CoreBrightness works in. The top level stands for kMaxNits: the panel's luminance has not been measured, so these set the slider's
+// scale, not an absolute brightness. kMidNits is CoreBrightness's own default.
+constexpr uint32_t kMinNits = 2, kMidNits = 140, kMaxNits = 500;
 constexpr uint32_t kMaxLevel = 2047, kStepMs = 16, kPollMs = 1, kStepDeadlineMs = 25, kAttachMs = 250, kAttachTries = 240;
 
 struct Window {IOMemoryMap *map; volatile uint32_t *va;};
@@ -256,14 +261,55 @@ class ShengBacklight : public IOService {
         return kIOReturnSuccess;
     }
     void publish(uint32_t value) {
-        OSDictionary *brightness = OSDictionary::withCapacity(3), *parameters = OSDictionary::withCapacity(1);
+        OSDictionary *brightness = OSDictionary::withCapacity(3), *milliNits = OSDictionary::withCapacity(3), *parameters = OSDictionary::withCapacity(2);
         OSNumber *min = OSNumber::withNumber(0ULL, 32), *max = OSNumber::withNumber(kMaxLevel, 32), *current = OSNumber::withNumber(value, 32);
-        if (brightness && parameters && min && max && current) {
+        OSNumber *minMilli = OSNumber::withNumber(kMinNits * 1000ULL, 32), *maxMilli = OSNumber::withNumber(kMaxNits * 1000ULL, 32);
+        OSNumber *currentMilli = OSNumber::withNumber((uint64_t)value * kMaxNits * 1000 / kMaxLevel, 32);
+        if (brightness && milliNits && parameters && min && max && current && minMilli && maxMilli && currentMilli) {
             brightness->setObject("min", min); brightness->setObject("max", max); brightness->setObject("value", current);
+            milliNits->setObject("min", minMilli); milliNits->setObject("max", maxMilli); milliNits->setObject("value", currentMilli);
             parameters->setObject("brightness", brightness);
+            // BrightnessControl takes the nits range and the current nits from here on iPadOS 27.
+            parameters->setObject("BrightnessMilliNits", milliNits);
             setProperty("IODisplayParameters", parameters);
         }
-        OSSafeReleaseNULL(min); OSSafeReleaseNULL(max); OSSafeReleaseNULL(current); OSSafeReleaseNULL(brightness); OSSafeReleaseNULL(parameters);
+        OSSafeReleaseNULL(min); OSSafeReleaseNULL(max); OSSafeReleaseNULL(current); OSSafeReleaseNULL(minMilli); OSSafeReleaseNULL(maxMilli);
+        OSSafeReleaseNULL(currentMilli); OSSafeReleaseNULL(brightness); OSSafeReleaseNULL(milliNits); OSSafeReleaseNULL(parameters);
+    }
+    // CoreBrightness's Display.m fails without a marketing table (equally spaced slider samples, signed 16.16 nits), and without calibration
+    // parameters it reads that table before loading it. Both describe the same range as BrightnessMilliNits. BrightnessControl takes the
+    // product luminances from their own properties, not from the calibration dictionary: at zero the table rescales to infinity and every
+    // slider position means the maximum.
+    void publishCalibration() {
+        const int32_t table[] = {(int32_t)(kMinNits << 16), (int32_t)(kMidNits << 16), (int32_t)(kMaxNits << 16)};
+        if (OSData *marketing = OSData::withBytes(table, sizeof table)) {
+            setProperty("backlight-marketing-table", marketing);
+            marketing->release();
+        }
+        // LmaxProduct is read as 4 bytes of 16.16. LmidProduct and LminProduct take a number as it is; as data they would be read as a float.
+        if (OSData *value = OSData::withBytes(&table[2], sizeof table[2])) {
+            setProperty("LmaxProduct", value);
+            value->release();
+        }
+        const struct {const char *key; uint32_t nits;} products[] = {{"LminProduct", kMinNits}, {"LmidProduct", kMidNits}};
+        for (const auto &product : products) {
+            if (OSNumber *value = OSNumber::withNumber(product.nits, 32)) {
+                setProperty(product.key, value);
+                value->release();
+            }
+        }
+        OSDictionary *calibration = OSDictionary::withCapacity(6);
+        if (!calibration) return;
+        const struct {const char *key; uint32_t nits;} fields[] = {{"lMinProduct", kMinNits}, {"lMidProduct", kMidNits}, {"lMaxProduct", kMaxNits},
+                                                                   {"lMinPanel", kMinNits}, {"lMidPanel", kMidNits}, {"lMaxPanel", kMaxNits}};
+        for (const auto &field : fields) {
+            if (OSNumber *number = OSNumber::withNumber((uint64_t)field.nits << 16, 32)) {
+                calibration->setObject(field.key, number);
+                number->release();
+            }
+        }
+        setProperty("backlight-calibration-parameters", calibration);
+        calibration->release();
     }
     // The service presents itself as AppleARMBacklight (AppleARMPlatform's class, loaded but without a device on this board): its
     // vtable is copied and getMetaClass (slot 7) answers that metaclass. IOObjectConformsTo and the sandbox both go through it: the
@@ -305,14 +351,15 @@ class ShengBacklight : public IOService {
         // does CoreBrightness start the libEDR server (com.apple.libEDR.Notification) that QuartzCore's IOMFBServer sends to
         // synchronously once backlight-control makes CADeviceHasBacklight true. int-236 published backlight-control without the
         // conformance: the server never started, the send blocked with the display server lock held and the screen stopped updating.
-        // sheng-backlight-control=0 leaves both out.
+        // backlight-control=0 leaves both out.
         uint32_t control = 1;
-        PE_parse_boot_argn("sheng-backlight-control", &control, sizeof control);
+        PE_parse_boot_argn("backlight-control", &control, sizeof control);
         // backboardd's sandbox profile refuses FadePeriod on this service (int-276), and CoreBrightness sends it with every brightness:
         // the grant (patches/xnu/zzwb-native-sandbox-grant-set-properties.patch) lets backboardd alone set its properties, which
         // setProperties checks itself.
         if (control == 1 && impersonate()) {setProperty("NativeSandboxGrantProcess", "backboardd"); setProperty("backlight-control", true);}
         const bool impersonated = control == 1 && gAppleClass;
+        publishCalibration();
         publish(level);
         registerService();
         native_backlight_stats[0] = impersonated ? 4 : 3;
@@ -343,16 +390,31 @@ public:
         loop->runAction(&ShengBacklight::begin, this);
         return true;
     }
+    // Level for signed 16.16 nits, proportional as the LED current is; a lit panel never rounds down to off.
+    static uint32_t levelForNits(int32_t fixed) {
+        if (fixed <= 0) return 0;
+        const uint64_t scale = (uint64_t)kMaxNits << 16;
+        const uint64_t scaled = ((uint64_t)fixed * kMaxLevel + scale / 2) / scale;
+        return scaled < 1 ? 1 : scaled > kMaxLevel ? kMaxLevel : (uint32_t)scaled;
+    }
     IOReturn setProperties(OSObject *properties) override {
         OSDictionary *dictionary = OSDynamicCast(OSDictionary, properties);
         if (!dictionary) return kIOReturnBadArgument;
-        OSNumber *brightness = OSDynamicCast(OSNumber, dictionary->getObject("brightness"));
-        if (!brightness) return kIOReturnSuccess;
-        OSNumber *fadePeriod = OSDynamicCast(OSNumber, dictionary->getObject("FadePeriod"));
-        const int32_t requested = (int32_t)brightness->unsigned32BitValue();
-        const uint32_t goal = requested < 0 ? 0 : (uint32_t)requested > kMaxLevel ? kMaxLevel : (uint32_t)requested;
-        uint64_t milliseconds = fadePeriod ? ((uint64_t)fadePeriod->unsigned32BitValue() * 1000) >> 16 : 0;
-        if (milliseconds > 5000) milliseconds = 5000;
+        // iPadOS 27 sends signed 16.16 nits and ramps them itself (zero or less is the display going dark); iPadOS 17 sends a level and a
+        // fade period in 16.16 seconds.
+        uint32_t goal;
+        uint64_t milliseconds = 0;
+        if (OSNumber *nits = OSDynamicCast(OSNumber, dictionary->getObject("brightness-nits"))) {
+            goal = levelForNits((int32_t)nits->unsigned32BitValue());
+        } else if (OSNumber *brightness = OSDynamicCast(OSNumber, dictionary->getObject("brightness"))) {
+            OSNumber *fadePeriod = OSDynamicCast(OSNumber, dictionary->getObject("FadePeriod"));
+            const int32_t requested = (int32_t)brightness->unsigned32BitValue();
+            goal = requested < 0 ? 0 : (uint32_t)requested > kMaxLevel ? kMaxLevel : (uint32_t)requested;
+            milliseconds = fadePeriod ? ((uint64_t)fadePeriod->unsigned32BitValue() * 1000) >> 16 : 0;
+            if (milliseconds > 5000) milliseconds = 5000;
+        } else {
+            return kIOReturnSuccess;
+        }
         bump(1);
         native_backlight_request[0] = (int32_t)goal;
         native_backlight_request[1] = (int32_t)milliseconds;

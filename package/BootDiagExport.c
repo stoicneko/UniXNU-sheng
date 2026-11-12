@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Seven-issue latency export: command/pass phases, allocation/release, CPU,
 // render thread waits, display arrival, fault and unnest evidence, and the
-// touch report times that bound the analysed windows; with sheng-shots=<s>,
+// touch report times that bound the analysed windows; with shots=<s>,
 // scene screenshots for the colour checks.
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -26,7 +26,7 @@ void boot_cache_loader_log_capture(unsigned now) {
   enum {capacity = 8192};
   if (enabled < 0) {
     uint32_t value = 0;
-    enabled = PE_parse_boot_argn("sheng-cache-log", &value, sizeof value) && value == 1;
+    enabled = PE_parse_boot_argn("cache-log", &value, sizeof value) && value == 1;
   }
   if (!enabled || !&native_wifi_logf) return;
   if (now > 120) { if (buffer) {IOFreeData(buffer, capacity); buffer = NULL;} return; }
@@ -66,11 +66,33 @@ void boot_cache_loader_log_capture(unsigned now) {
   if (error != last_error) {last_error = error; native_wifi_logf(6, "cache-loader-file: read status %d", error);}
 }
 
-
 enum {DiagMaxFiles = 128, DiagPath = 192, DiagDepth = 0, DiagChunk = 256 * 1024, DiagNote = 32768};
 struct diag_file {char path[DiagPath]; uint64_t size; uint32_t mode, uid, gid, root, keep;};
 static struct diag_file *diag_files;
 static uint32_t diag_count, diag_skipped_count;
+static void *cache_input;
+static uint32_t cache_input_size, cache_keep;
+uint32_t boot_cache_input_ready(void) {return __atomic_load_n(&cache_input_size,__ATOMIC_ACQUIRE);}
+void boot_cache_input_capture(user_addr_t address,uint64_t size) {
+  uint32_t enabled=0;
+  if(!PE_parse_boot_argn("cache-log",&enabled,sizeof enabled) || enabled!=1 ||
+      !address || size<32 || size>4*1024*1024 || boot_cache_input_ready())return;
+  void *data=IOMallocAligned((size_t)size,PAGE_SIZE);
+  if(!data)return;
+  if(copyin(address,data,(size_t)size)){IOFreeAligned(data,(size_t)size);return;}
+  cache_input=data;
+  __atomic_store_n(&cache_input_size,(uint32_t)size,__ATOMIC_RELEASE);
+}
+static const char *const cache_paths[]={
+  "/System/Library/xpc/launchd.plist", "/private/var/ngpu/xpc/launchd.plist",
+  "/private/var/log/com.apple.xpc.launchd/launchd_cache_loader.log"
+};
+static int cache_path(const char *path) {
+  if(!boot_cache_input_ready())return 0;
+  for(unsigned i=0;i<sizeof cache_paths/sizeof cache_paths[0];++i)if(!strcmp(path,cache_paths[i]))return 1;
+  return 0;
+}
+
 static char *diag_note;   // diag-skipped.txt
 static size_t diag_note_used;
 volatile uint32_t boot_diag_files, boot_diag_skipped, boot_diag_errors;
@@ -113,7 +135,6 @@ static uint32_t gpu_trace_size[1];
 static const char *gpu_trace_name[1]={"gpu.trace.bin"};
 static const uint32_t gpu_trace_capacity[1]={32+(65536+4096)*120};
 
-
 static void note(const char *text, const char *path, int error) {
   if (!diag_note) return;
   int n = snprintf(diag_note + diag_note_used, DiagNote - diag_note_used, "%s %s %d\n", text, path, error);
@@ -121,7 +142,7 @@ static void note(const char *text, const char *path, int error) {
 }
 
 static void add(const char *path, uint32_t root, vfs_context_t ctx) {
-  if(!bl_latency_file(path))return;
+  if(!bl_latency_file(path) && !cache_path(path))return;
   vnode_t file = NULLVP;
   int error = vnode_lookup(path, 0, &file, ctx);
   if (error) {note("lookup", path, error); ++boot_diag_errors; return;}
@@ -291,7 +312,7 @@ static void latency_tick(void) {
   }
 }
 
-// Scene screenshots (boot-arg sheng-shots=<first second of log time>, absent or 0: none): bursts of DiagBurst shots 50 ms apart (about six
+// Scene screenshots (boot-arg shots=<first second of log time>, absent or 0: none): bursts of DiagBurst shots 50 ms apart (about six
 // frames at 120 Hz), one burst every DiagBurstEvery seconds from that second on, up to DiagShots, of the panel at quarter resolution (every
 // fourth pixel of every fourth row), kept in memory and exported as screen-<seconds>-<index in the burst>.bgrx (16-byte header "SHOT", u32
 // width, height, stride, then BGRX rows). Shots of one burst show a picture that alternates between frames; a static scene repeats. They are
@@ -302,7 +323,7 @@ extern void native_legacy_direct_snapshot(void) __attribute__((weak_import));   
 static uint8_t *shot_data[DiagShots];
 static uint32_t shot_time[DiagShots], shot_index[DiagShots], shot_w, shot_h, shot_taken, shot_first, shot_first_read, shots_kept;
 static void shot_tick(unsigned now) {
-  if (!shot_first_read) {shot_first_read = 1; if (!PE_parse_boot_argn("sheng-shots", &shot_first, sizeof shot_first)) shot_first = 0;}
+  if (!shot_first_read) {shot_first_read = 1; if (!PE_parse_boot_argn("shots", &shot_first, sizeof shot_first)) shot_first = 0;}
   if (!shot_first || shot_taken >= DiagShots || now < shot_first + (shot_taken / DiagBurst) * DiagBurstEvery) return;
   for (unsigned k = 0; k < DiagBurst && shot_taken < DiagShots; ++k) {
     if (k) IOSleep(50);
@@ -422,6 +443,20 @@ uint64_t boot_diag_scan(uint64_t budget) {
   diag_count = diag_skipped_count = 0; diag_note_used = 0; diag_note[0] = 0;
   const char *note_name = "diag-skipped.txt";
   uint64_t used = 8 + 4 + 1 + 4 + 24 + strlen(note_name) + DiagNote;   // head with root "/", the note file at its full size
+  cache_keep=boot_cache_input_ready();
+  if(cache_keep) {
+    used+=24+strlen("launchd-parser-input.plist")+cache_keep;
+    if(used>budget){cache_keep=0;return 0;}
+    vfs_context_t ctx=vfs_context_kernel();
+    for(unsigned i=0;i<sizeof cache_paths/sizeof cache_paths[0];++i)add(cache_paths[i],0,ctx);
+    boot_diag_files=0;
+    for(uint32_t i=0;i<diag_count;++i) {
+      struct diag_file *f=&diag_files[i];uint64_t cost=24+strlen(f->path+1)+f->size;
+      if(f->size>4*1024*1024 || cost>budget-used){note("cache-budget",f->path,(int)f->size);continue;}
+      f->keep=1;used+=cost;++boot_diag_files;
+    }
+    return used;
+  }
   latency_size=0;
   if(!latency_data)latency_data=IOMallocAligned(LatencyCapacity,PAGE_SIZE);
   if(latency_data) {
@@ -439,7 +474,7 @@ uint64_t boot_diag_scan(uint64_t budget) {
     if(n && used+24+strlen(gpu_trace_name[i])+n<=budget){gpu_trace_size[i]=n;used+=24+strlen(gpu_trace_name[i])+n;}
     else if(n)note("gpu-budget",gpu_trace_name[i],(int)n);
   }
-  // The scene screenshots, which a run asks for by sheng-shots, come before the files: they are what such a run is for.
+  // The scene screenshots, which a run asks for by shots, come before the files: they are what such a run is for.
   shots_kept = 0;
   for (unsigned i = 0; i < DiagShots; ++i) {
     if (!shot_data[i]) continue;
@@ -549,10 +584,17 @@ int boot_diag_stream(boot_diag_emit_t emit, void *arg) {
   if (!chunk) return -1;
   vfs_context_t ctx = vfs_context_kernel();
   int rc = emit("M2VCACH1", 8, arg);
-  const uint32_t root_len = 1, count = boot_diag_files + 1 + rings_keep + client_keep + touch_keep + !!path_trace + vsync_keep + cpufreq_keep + cpu_keep + boalloc_keep + ptime_keep + !!gpu_trace_size[0] + !!latency_size + shots_kept;
+  const uint32_t root_len = 1, count = boot_diag_files + 1 + rings_keep + client_keep + touch_keep + !!path_trace + vsync_keep + cpufreq_keep + cpu_keep + boalloc_keep + ptime_keep + !!gpu_trace_size[0] + !!latency_size + shots_kept + !!cache_keep;
   if (!rc) rc = emit(&root_len, 4, arg);
   if (!rc) rc = emit("/", 1, arg);
   if (!rc) rc = emit(&count, 4, arg);
+  if(!rc && cache_keep) {
+    rc=put_head(emit,arg,"launchd-parser-input.plist",0100644,0,0,cache_keep);
+    for(uint32_t at=0;at<cache_keep && !rc;) {
+      uint32_t n=cache_keep-at;if(n>65536)n=65536;
+      rc=emit((const char *)cache_input+at,n,arg);at+=n;
+    }
+  }
   for(unsigned i=0;i<1 && !rc;++i)if(gpu_trace_size[i]) {
     rc=put_head(emit,arg,gpu_trace_name[i],0100644,0,0,gpu_trace_size[i]);
     for(uint32_t at=0;at<gpu_trace_size[i] && !rc;) {
