@@ -1,0 +1,15 @@
+diff --git a/NativeAdrenoPublish.cpp b/NativeAdrenoPublish.cpp
+index cf790cb..ed5cc0e 100644
+--- a/NativeAdrenoPublish.cpp
++++ b/NativeAdrenoPublish.cpp
+@@ -331,6 +331,10 @@ OSDefineMetaClassAndStructors(NativeAdrenoGpuPublished,IOService)
+  * entry or copy refers to that VM object any more, and the pages return to the pool. Without that report the pool does not reuse
+  * the pages of a grant that had a view unless the board set gpu-pool=2 (NativeAdrenoPool.h). */
+ extern "C" kern_return_t iokit_physical_descriptor_close_notify(IOMemoryDescriptor *,void (*)(void *),void *) __attribute__((weak_import));
++#if !defined(XNU_TARGET_OS_OSX) /* Local (Linux ld64): absent on iPadOS */
++static kern_return_t (*const iokit_physical_descriptor_close_notify_absent)(IOMemoryDescriptor *,void (*)(void *),void *) = nullptr;
++#define iokit_physical_descriptor_close_notify (*iokit_physical_descriptor_close_notify_absent)
++#endif
+ class NativeAdrenoPoolView : public IOGeneralMemoryDescriptor {
+     OSDeclareDefaultStructors(NativeAdrenoPoolView)
+     NativeAdrenoPoolGrant *grant_=nullptr;
