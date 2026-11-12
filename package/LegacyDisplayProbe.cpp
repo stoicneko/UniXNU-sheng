@@ -144,6 +144,9 @@ void native_legacy_surface_rejected(uint64_t width,uint64_t height,uint32_t form
 }
 // The display's request layout (rectangles, masks, options, dimensions, surfaces); the iPadOS 17 one when the display has none.
 extern "C" const unsigned native_legacy_request_layout[6] __attribute__((weak_import));
+#if !defined(XNU_TARGET_OS_OSX) /* Local (Linux ld64): absent on iPadOS */
+#define native_legacy_request_layout (*(const unsigned (*)[6])nullptr)
+#endif
 static void recordRejectedSwap(unsigned reason,const void *request,const void *surface) {
     const unsigned char *bytes=reinterpret_cast<const unsigned char *>(request);
     if(!bytes)return;
@@ -534,6 +537,12 @@ extern void sheng_bluetooth_probe(void) __attribute__((weak_import));
 extern void sheng_usb_probe(void) __attribute__((weak_import));
 extern "C" void sheng_ethernet_probe(void) __attribute__((weak_import));   // macOS builds only (ShengEthernet.cpp)
 extern "C" void sheng_software_aes_probe(void) __attribute__((weak_import));   // macOS builds only (SoftwareAesProbe.cpp)
+#if !defined(XNU_TARGET_OS_OSX) /* Local (Linux ld64): absent on iPadOS */
+static void (*const sheng_ethernet_probe_absent)(void) = nullptr;
+static void (*const sheng_software_aes_probe_absent)(void) = nullptr;
+#define sheng_ethernet_probe (*sheng_ethernet_probe_absent)
+#define sheng_software_aes_probe (*sheng_software_aes_probe_absent)
+#endif
 extern void sheng_adsp_probe(void);
 extern void sheng_battery_probe(void);
 extern void sheng_audio_probe(void);

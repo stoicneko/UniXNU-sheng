@@ -346,6 +346,10 @@ extern uint64_t cs_native4k_digest_wall[2] __attribute__((weak_import)), cs_nati
   cs_native4k_digest_bytes[2] __attribute__((weak_import)), cs_native4k_chunk_ticks __attribute__((weak_import)),
   cs_native4k_record_ticks __attribute__((weak_import));
 extern unsigned long cs_native4k_chunks_made __attribute__((weak_import));
+#if !defined(XNU_TARGET_OS_OSX) /* Local (Linux ld64): absent on iPadOS */
+#define cs_native4k_digest_wall (*(uint64_t (*)[2])0)
+#define cs_native4k_record_ticks (*(uint64_t *)0)
+#endif
 extern volatile uint32_t sheng_edge_idle_beside_queued[2][8] __attribute__((weak_import));
 extern volatile uint32_t native_touch_cost[9] __attribute__((weak_import));
 extern volatile uint32_t native_touch_irq_stats[4] __attribute__((weak_import));
@@ -2164,8 +2168,8 @@ static size_t compose(char *out, size_t cap, uint32_t slot, unsigned now) {
              native_swipe_stats[5] % 1000, native_swipe_stats[6] / 1000, native_swipe_stats[6] % 1000, native_swipe_stats[7] / 1000,
              native_swipe_stats[7] % 1000);
     at = put(out, at, cap, row, sizeof row);
-    snprintf(row, sizeof row, "[swipe2] heavy=%u.%03us controlcenter..%u.%03us notification..%u.%03us apps..%u.%03us", native_swipe_stats[16] / 1000,
-             native_swipe_stats[16] % 1000, native_swipe_stats[9] / 1000, native_swipe_stats[9] % 1000, native_swipe_stats[10] / 1000,
+    snprintf(row, sizeof row, "[swipe2] heavy=%u.%03us controlcenter..%u.%03us notification..%u.%03us apps..%u.%03us", native_swipe_stats[8] / 1000,
+             native_swipe_stats[8] % 1000, native_swipe_stats[9] / 1000, native_swipe_stats[9] % 1000, native_swipe_stats[10] / 1000,
              native_swipe_stats[10] % 1000, native_swipe_stats[11] / 1000, native_swipe_stats[11] % 1000);
     at = put(out, at, cap, row, sizeof row);
   }
